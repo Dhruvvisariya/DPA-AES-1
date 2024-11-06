@@ -1,9 +1,11 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import csv
+from pathlib import Path
+from typing import List, Tuple, Optional
+from dataclasses import dataclass
 from Crypto.Random import get_random_bytes
 
-# AES S-box for SubBytes step
 S_BOX = [
     # Full S-box array, 256 entries
             0x63, 0x7C, 0x77, 0x7B, 0xF2, 0x6B, 0x6F, 0xC5, 0x30, 0x01, 0x67, 0x2B, 0xFE, 0xD7, 0xAB, 0x76,
@@ -24,92 +26,171 @@ S_BOX = [
             0x8C, 0xA1, 0x89, 0x0D, 0xBF, 0xE6, 0x42, 0x68, 0x41, 0x99, 0x2D, 0x0F, 0xB0, 0x54, 0xBB, 0x16
 ]
 
+@dataclass
+class TraceMetadata:
+    """Stores metadata for each power trace"""
+    plaintext: bytes
+    key: bytes
+    timestamp: float
+    trace_length: int
+
 class AESPowerTraceGenerator:
-    def __init__(self, key, num_rounds=10, samples_per_operation=10, noise_level=0.5):
-        self.key = key
+    """Generates power consumption traces for AES encryption operations"""
+    
+    # Class-level constants
+    NUM_BYTES = 16
+    STATE_SIZE = 4
+    
+    def __init__(
+        self, 
+        key: bytes,
+        num_rounds: int = 10,
+        samples_per_operation: int = 10,
+        noise_level: float = 0.5
+    ):
+        """
+        Initialize the AES Power Trace Generator
+        
+        Args:
+            key: 16-byte encryption key
+            num_rounds: Number of AES rounds
+            samples_per_operation: Number of samples per operation
+            noise_level: Standard deviation of Gaussian noise
+        
+        Raises:
+            ValueError: If key length is not 16 bytes or parameters are invalid
+        """
+        if len(key) != self.NUM_BYTES:
+            raise ValueError(f"Key must be {self.NUM_BYTES} bytes long")
+        if num_rounds < 1:
+            raise ValueError("Number of rounds must be positive")
+        if samples_per_operation < 1:
+            raise ValueError("Samples per operation must be positive")
+        if noise_level < 0:
+            raise ValueError("Noise level must be non-negative")
+            
+        self.key = np.frombuffer(key, dtype=np.uint8)
         self.num_rounds = num_rounds
         self.samples_per_operation = samples_per_operation
         self.noise_level = noise_level
+        self._initialize_sbox()
 
-    def _hamming_weight(self, byte):
-        """Calculates the Hamming weight of a byte."""
+    def _initialize_sbox(self) -> None:
+        """Initialize S-box as numpy array for better performance"""
+        self.s_box = np.array(S_BOX, dtype=np.uint8)
+
+    @staticmethod
+    def _hamming_weight(byte: int) -> int:
+        """
+        Calculate the Hamming weight (number of 1s) in a byte
+        
+        Args:
+            byte: Input byte
+        Returns:
+            Number of 1s in binary representation
+        """
         return bin(byte).count("1")
 
-    def _generate_power_samples(self, hamming_value):
-        """Generates power consumption samples for a given Hamming value."""
-        base_power = np.ones(self.samples_per_operation) * hamming_value
+    def _generate_power_samples(self, hamming_value: int) -> np.ndarray:
+        """
+        Generate power consumption samples for a given Hamming weight
+        
+        Args:
+            hamming_value: Hamming weight of the byte
+        Returns:
+            Array of power samples with noise
+        """
+        base_power = np.full(self.samples_per_operation, hamming_value, dtype=np.float32)
         noise = np.random.normal(0, self.noise_level, self.samples_per_operation)
         return base_power + noise
 
-    def _sub_bytes(self, state):
-        """Simulates the SubBytes step using AES S-box."""
-        transformed_state = np.copy(state)
+    def _sub_bytes(self, state: np.ndarray) -> Tuple[List[float], np.ndarray]:
+        """
+        Perform SubBytes transformation using vectorized operations
+        
+        Args:
+            state: Current state array
+        Returns:
+            Tuple of (power trace, transformed state)
+        """
+        transformed_state = self.s_box[state]
+        hamming_values = np.array([self._hamming_weight(byte) for byte in transformed_state])
         trace = []
-        for i in range(len(state)):
-            transformed_byte = S_BOX[state[i]]
-            hamming_value = self._hamming_weight(transformed_byte)
-            trace.extend(self._generate_power_samples(hamming_value))
-            transformed_state[i] = transformed_byte
+        for hw in hamming_values:
+            trace.extend(self._generate_power_samples(hw))
         return trace, transformed_state
 
-    def _shift_rows(self, state):
-        """Performs the ShiftRows step by shifting each row of the state array."""
-        transformed_state = np.copy(state)
+    def _shift_rows(self, state: np.ndarray) -> Tuple[List[float], np.ndarray]:
+        """
+        Perform ShiftRows transformation using matrix operations
+        
+        Args:
+            state: Current state array
+        Returns:
+            Tuple of (power trace, transformed state)
+        """
+        # Reshape to 4x4 matrix for easier shifting
+        matrix = state.reshape(self.STATE_SIZE, self.STATE_SIZE)
+        
+        # Perform row shifts
+        for i in range(1, self.STATE_SIZE):
+            matrix[i] = np.roll(matrix[i], -i)
+            
+        transformed_state = matrix.flatten()
+        
+        # Generate power traces
         trace = []
-
-        # Shift rows (AES standard)
-        transformed_state[1], transformed_state[5], transformed_state[9], transformed_state[13] = \
-            transformed_state[5], transformed_state[9], transformed_state[13], transformed_state[1]
-        transformed_state[2], transformed_state[6], transformed_state[10], transformed_state[14] = \
-            transformed_state[10], transformed_state[14], transformed_state[2], transformed_state[6]
-        transformed_state[3], transformed_state[7], transformed_state[11], transformed_state[15] = \
-            transformed_state[15], transformed_state[3], transformed_state[7], transformed_state[11]
-
-        # Add power consumption for ShiftRows
         for byte in transformed_state:
-            hamming_value = self._hamming_weight(byte)
-            trace.extend(self._generate_power_samples(hamming_value))
-
+            trace.extend(self._generate_power_samples(self._hamming_weight(byte)))
+            
         return trace, transformed_state
 
-    def _mix_columns(self, state):
-        """Simulates the MixColumns transformation."""
-        trace = []
+    def _mix_columns(self, state: np.ndarray) -> Tuple[List[float], np.ndarray]:
+        """
+        Perform MixColumns transformation with improved matrix operations
+        
+        Args:
+            state: Current state array
+        Returns:
+            Tuple of (power trace, transformed state)
+        """
         transformed_state = np.copy(state)
-
-        # Simplified MixColumns without full GF(2^8) multiplication for realistic trace modeling
-        for i in range(0, 16, 4):
-            col = state[i:i+4]
-            transformed_state[i] = col[0] ^ col[1]
-            transformed_state[i+1] = col[1] ^ col[2]
-            transformed_state[i+2] = col[2] ^ col[3]
-            transformed_state[i+3] = col[3] ^ col[0]
-
-            # Add power consumption for each mixed column byte
-            for byte in transformed_state[i:i+4]:
-                hamming_value = self._hamming_weight(byte)
-                trace.extend(self._generate_power_samples(hamming_value))
-
+        trace = []
+        
+        # Process each column
+        for i in range(0, self.NUM_BYTES, self.STATE_SIZE):
+            col = state[i:i + self.STATE_SIZE]
+            # Improved mixing using circular XOR
+            transformed_state[i:i + self.STATE_SIZE] = np.roll(col, 1) ^ col
+            
+            for byte in transformed_state[i:i + self.STATE_SIZE]:
+                trace.extend(self._generate_power_samples(self._hamming_weight(byte)))
+                
         return trace, transformed_state
 
-    def _add_round_key(self, state, round_key):
-        """Simulates AddRoundKey."""
+    def generate_trace(self, plaintext: bytes) -> Tuple[np.ndarray, TraceMetadata]:
+        """
+        Generate a complete power trace for AES encryption
+        
+        Args:
+            plaintext: 16-byte plaintext
+        Returns:
+            Tuple of (power trace array, trace metadata)
+        
+        Raises:
+            ValueError: If plaintext length is invalid
+        """
+        if len(plaintext) != self.NUM_BYTES:
+            raise ValueError(f"Plaintext must be {self.NUM_BYTES} bytes long")
+            
+        state = np.frombuffer(plaintext, dtype=np.uint8)
         trace = []
-        for i in range(len(state)):
-            hamming_value = self._hamming_weight(state[i] ^ round_key[i % len(round_key)])
-            trace.extend(self._generate_power_samples(hamming_value))
-        return trace
-
-    def generate_trace(self, plaintext):
-        """Generates a complete power trace for AES encryption."""
-        state = np.frombuffer(plaintext, dtype=np.uint8)[:16]
-        trace = []
-
-        # Initial round: AddRoundKey
+        
+        # Initial round
         trace.extend(self._add_round_key(state, self.key))
-
-        # Main rounds with all steps
-        for round_num in range(self.num_rounds - 1):
+        
+        # Main rounds
+        for _ in range(self.num_rounds - 1):
             sub_trace, state = self._sub_bytes(state)
             trace.extend(sub_trace)
             shift_trace, state = self._shift_rows(state)
@@ -117,48 +198,136 @@ class AESPowerTraceGenerator:
             mix_trace, state = self._mix_columns(state)
             trace.extend(mix_trace)
             trace.extend(self._add_round_key(state, self.key))
-
-        # Final round: SubBytes, ShiftRows, AddRoundKey
+            
+        # Final round
         sub_trace, state = self._sub_bytes(state)
         trace.extend(sub_trace)
         shift_trace, state = self._shift_rows(state)
         trace.extend(shift_trace)
         trace.extend(self._add_round_key(state, self.key))
+        
+        trace_array = np.array(trace)
+        metadata = TraceMetadata(
+            plaintext=plaintext,
+            key=self.key.tobytes(),
+            timestamp=np.datetime64('now').astype(float),
+            trace_length=len(trace_array)
+        )
+        
+        return trace_array, metadata
 
-        return np.array(trace)
-
-    def generate_traces(self, num_traces):
-        """Generates multiple traces with random plaintexts."""
+    def generate_traces(
+        self,
+        num_traces: int,
+        save_path: Optional[Path] = None
+    ) -> Tuple[np.ndarray, List[TraceMetadata]]:
+        """
+        Generate multiple traces with random plaintexts
+        
+        Args:
+            num_traces: Number of traces to generate
+            save_path: Optional path to save traces
+        Returns:
+            Tuple of (traces array, list of metadata)
+        """
         traces = []
+        metadata_list = []
+        
         for _ in range(num_traces):
-            plaintext = get_random_bytes(16)
-            trace = self.generate_trace(plaintext)
+            plaintext = get_random_bytes(self.NUM_BYTES)
+            trace, metadata = self.generate_trace(plaintext)
             traces.append(trace)
-        return np.array(traces)
+            metadata_list.append(metadata)
+            
+        traces_array = np.array(traces)
+        
+        if save_path:
+            self.save_traces(traces_array, metadata_list, save_path)
+            
+        return traces_array, metadata_list
 
-    def save_traces_to_csv(self, traces, filename="power_traces.csv"):
-        """Saves traces to a CSV file."""
-        with open(filename, mode="w", newline="") as file:
-            writer = csv.writer(file)
-            writer.writerows(traces)
+    def save_traces(
+        self,
+        traces: np.ndarray,
+        metadata: List[TraceMetadata],
+        save_path: Path
+    ) -> None:
+        """
+        Save traces and metadata to files
+        
+        Args:
+            traces: Array of power traces
+            metadata: List of trace metadata
+            save_path: Path to save directory
+        """
+        save_path = Path(save_path)
+        save_path.mkdir(parents=True, exist_ok=True)
+        
+        # Save traces
+        np.save(save_path / "traces.npy", traces)
+        
+        # Save metadata
+        with open(save_path / "metadata.csv", "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["plaintext", "key", "timestamp", "trace_length"])
+            for meta in metadata:
+                writer.writerow([
+                    meta.plaintext.hex(),
+                    meta.key.hex(),
+                    meta.timestamp,
+                    meta.trace_length
+                ])
 
-    def plot_trace(self, trace, title="AES Power Trace"):
-        """Plots a single power trace."""
+    def plot_trace(
+        self,
+        trace: np.ndarray,
+        title: str = "AES Power Trace",
+        save_path: Optional[Path] = None
+    ) -> None:
+        """
+        Plot a single power trace
+        
+        Args:
+            trace: Power trace array
+            title: Plot title
+            save_path: Optional path to save plot
+        """
         plt.figure(figsize=(12, 6))
         plt.plot(trace, color='blue', linewidth=0.5)
         plt.title(title)
         plt.xlabel("Sample Index")
-        plt.ylabel("Power Consumption")
-        plt.show()
+        plt.ylabel("Power Consumption (normalized)")
+        plt.grid(True, alpha=0.3)
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        else:
+            plt.show()
+        plt.close()
 
 # Example usage
-key = np.random.randint(0, 256, size=16, dtype=np.uint8)
-trace_generator = AESPowerTraceGenerator(key, num_rounds=10, samples_per_operation=100, noise_level=0.5)
-
-# Generate traces and save to CSV
-num_traces = 1
-traces = trace_generator.generate_traces(num_traces)
-trace_generator.save_traces_to_csv(traces, filename="aes_power_traces.csv")
-
-# Plot a sample trace
-trace_generator.plot_trace(traces[0], title="Sample AES Power Trace with S-Box, ShiftRows, and MixColumns")
+if __name__ == "__main__":
+    # Generate random key
+    key = get_random_bytes(16)
+    
+    # Create generator
+    trace_generator = AESPowerTraceGenerator(
+        key=key,
+        num_rounds=10,
+        samples_per_operation=100,
+        noise_level=0.5
+    )
+    
+    # Generate and save traces
+    save_dir = Path("power_traces")
+    traces, metadata = trace_generator.generate_traces(
+        num_traces=10,
+        save_path=save_dir
+    )
+    
+    # Plot first trace
+    trace_generator.plot_trace(
+        traces[0],
+        title="Sample AES Power Trace",
+        save_path=save_dir / "sample_trace.png"
+    )
