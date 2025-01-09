@@ -76,12 +76,11 @@ Cryptographic devices ensure secure communication but are susceptible to side-ch
 - Key observations:
   - 100 and 300 traces were insufficient due to noise dominance.
 
-### 100:
-<img width="851" alt="AsperbookDPA100" src="https://github.com/user-attachments/assets/a5c08c69-63bf-47d2-98c5-45f591b70c25" />
-### 300:
-<img width="741" alt="AsperbookDPA300" src="https://github.com/user-attachments/assets/9e817585-7694-44ca-a42d-71e40fd1a042" />
-### 500:
-<img width="853" alt="AsperbookDPA500" src="https://github.com/user-attachments/assets/e5f824af-4666-4d51-8552-0f15d96e0dd6" />
+### 100:<img width="851" alt="AsperbookDPA100" src="https://github.com/user-attachments/assets/a5c08c69-63bf-47d2-98c5-45f591b70c25" />.
+
+### 300:<img width="741" alt="AsperbookDPA300" src="https://github.com/user-attachments/assets/9e817585-7694-44ca-a42d-71e40fd1a042" />.
+
+### 500:<img width="853" alt="AsperbookDPA500" src="https://github.com/user-attachments/assets/e5f824af-4666-4d51-8552-0f15d96e0dd6" />.
 
  - Increasing the number of traces averaged out noise and improved statistical precision.
 
